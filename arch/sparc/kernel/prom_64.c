@@ -34,7 +34,7 @@
 
 void * __init prom_early_alloc(unsigned long size)
 {
-	unsigned long paddr = memblock_alloc(size, SMP_CACHE_BYTES);
+	unsigned long paddr = memblock_phys_alloc(size, SMP_CACHE_BYTES);
 	void *ret;
 
 	if (!paddr) {
@@ -381,7 +381,7 @@ bool arch_find_n_match_cpu_physical_id(struct device_node *cpun,
 	int this_cpu_id;
 
 	/* On hypervisor based platforms we interrogate the 'reg'
-	 * property.  On everything else we look for a 'upa-portis',
+	 * property.  On everything else we look for a 'upa-portid',
 	 * 'portid', or 'cpuid' property.
 	 */
 

@@ -1172,7 +1172,10 @@ static void bcm2835_request(struct mmc_host *mmc, struct mmc_request *mrq)
 	if (mrq->data && !is_power_of_2(mrq->data->blksz)) {
 		dev_err(dev, "unsupported block size (%d bytes)\n",
 			mrq->data->blksz);
-		mrq->cmd->error = -EINVAL;
+
+		if (mrq->cmd)
+			mrq->cmd->error = -EINVAL;
+
 		mmc_request_done(mmc, mrq);
 		return;
 	}
@@ -1194,7 +1197,10 @@ static void bcm2835_request(struct mmc_host *mmc, struct mmc_request *mrq)
 			readl(host->ioaddr + SDCMD) & SDCMD_CMD_MASK,
 			edm);
 		bcm2835_dumpregs(host);
-		mrq->cmd->error = -EILSEQ;
+
+		if (mrq->cmd)
+			mrq->cmd->error = -EILSEQ;
+
 		bcm2835_finish_request(host);
 		mutex_unlock(&host->mutex);
 		return;
@@ -1207,7 +1213,7 @@ static void bcm2835_request(struct mmc_host *mmc, struct mmc_request *mrq)
 			if (!host->use_busy)
 				bcm2835_finish_command(host);
 		}
-	} else if (bcm2835_send_command(host, mrq->cmd)) {
+	} else if (mrq->cmd && bcm2835_send_command(host, mrq->cmd)) {
 		if (host->data && host->dma_desc) {
 			/* DMA transfer starts now, PIO starts after irq */
 			bcm2835_start_dma(host);
@@ -1246,7 +1252,7 @@ static void bcm2835_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 	mutex_unlock(&host->mutex);
 }
 
-static struct mmc_host_ops bcm2835_ops = {
+static const struct mmc_host_ops bcm2835_ops = {
 	.request = bcm2835_request,
 	.set_ios = bcm2835_set_ios,
 	.hw_reset = bcm2835_reset,
@@ -1259,7 +1265,8 @@ static int bcm2835_add_host(struct bcm2835_host *host)
 	char pio_limit_string[20];
 	int ret;
 
-	mmc->f_max = host->max_clk;
+	if (!mmc->f_max || mmc->f_max > host->max_clk)
+		mmc->f_max = host->max_clk;
 	mmc->f_min = host->max_clk / SDCDIV_MAX_CDIV;
 
 	mmc->max_busy_timeout = ~0 / (mmc->f_max / 1000);

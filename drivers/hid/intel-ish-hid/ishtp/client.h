@@ -84,6 +84,7 @@ struct ishtp_cl {
 	/* Client Tx buffers list */
 	unsigned int	tx_ring_size;
 	struct ishtp_cl_tx_ring	tx_list, tx_free_list;
+	int		tx_ring_free_size;
 	spinlock_t	tx_list_spinlock;
 	spinlock_t	tx_free_list_spinlock;
 	size_t	tx_offs;	/* Offset in buffer at head of 'tx_list' */
@@ -118,9 +119,9 @@ struct ishtp_cl {
 	unsigned int	out_flow_ctrl_cnt;
 
 	/* Rx msg ... out FC timing */
-	struct timespec ts_rx;
-	struct timespec ts_out_fc;
-	struct timespec ts_max_fc_delay;
+	ktime_t ts_rx;
+	ktime_t ts_out_fc;
+	ktime_t ts_max_fc_delay;
 	void *client_data;
 };
 
@@ -137,6 +138,8 @@ int ishtp_cl_alloc_rx_ring(struct ishtp_cl *cl);
 int ishtp_cl_alloc_tx_ring(struct ishtp_cl *cl);
 void ishtp_cl_free_rx_ring(struct ishtp_cl *cl);
 void ishtp_cl_free_tx_ring(struct ishtp_cl *cl);
+int ishtp_cl_get_tx_free_buffer_size(struct ishtp_cl *cl);
+int ishtp_cl_get_tx_free_rings(struct ishtp_cl *cl);
 
 /* DMA I/F functions */
 void recv_ishtp_cl_msg_dma(struct ishtp_device *dev, void *msg,
@@ -178,5 +181,7 @@ int ishtp_cl_flush_queues(struct ishtp_cl *cl);
 
 /* exported functions from ISHTP client buffer management scope */
 int ishtp_cl_io_rb_recycle(struct ishtp_cl_rb *rb);
+bool ishtp_cl_tx_empty(struct ishtp_cl *cl);
+struct ishtp_cl_rb *ishtp_cl_rx_get_rb(struct ishtp_cl *cl);
 
 #endif /* _ISHTP_CLIENT_H_ */

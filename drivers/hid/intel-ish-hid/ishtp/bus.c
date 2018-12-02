@@ -149,6 +149,31 @@ int ishtp_fw_cl_by_uuid(struct ishtp_device *dev, const uuid_le *uuid)
 EXPORT_SYMBOL(ishtp_fw_cl_by_uuid);
 
 /**
+ * ishtp_fw_cl_get_client() - return client information to client
+ * @dev: the ishtp device structure
+ * @uuid: uuid of the client to search
+ *
+ * Search firmware client using UUID and reture related client information.
+ *
+ * Return: pointer of client information on success, NULL on failure.
+ */
+struct ishtp_fw_client *ishtp_fw_cl_get_client(struct ishtp_device *dev,
+						const uuid_le *uuid)
+{
+	int i;
+	unsigned long flags;
+
+	spin_lock_irqsave(&dev->fw_clients_lock, flags);
+	i = ishtp_fw_cl_by_uuid(dev, uuid);
+	spin_unlock_irqrestore(&dev->fw_clients_lock, flags);
+	if (i < 0 || dev->fw_clients[i].props.fixed_address)
+		return NULL;
+
+	return &dev->fw_clients[i];
+}
+EXPORT_SYMBOL(ishtp_fw_cl_get_client);
+
+/**
  * ishtp_fw_cl_by_id() - return index to fw_clients for client_id
  * @dev: the ishtp device structure
  * @client_id: fw client id to search
@@ -321,11 +346,13 @@ static ssize_t modalias_show(struct device *dev, struct device_attribute *a,
 	len = snprintf(buf, PAGE_SIZE, "ishtp:%s\n", dev_name(dev));
 	return (len >= PAGE_SIZE) ? (PAGE_SIZE - 1) : len;
 }
+static DEVICE_ATTR_RO(modalias);
 
-static struct device_attribute ishtp_cl_dev_attrs[] = {
-	__ATTR_RO(modalias),
-	__ATTR_NULL,
+static struct attribute *ishtp_cl_dev_attrs[] = {
+	&dev_attr_modalias.attr,
+	NULL,
 };
+ATTRIBUTE_GROUPS(ishtp_cl_dev);
 
 static int ishtp_cl_uevent(struct device *dev, struct kobj_uevent_env *env)
 {
@@ -346,7 +373,7 @@ static const struct dev_pm_ops ishtp_cl_bus_dev_pm_ops = {
 
 static struct bus_type ishtp_cl_bus_type = {
 	.name		= "ishtp",
-	.dev_attrs	= ishtp_cl_dev_attrs,
+	.dev_groups	= ishtp_cl_dev_groups,
 	.probe		= ishtp_cl_device_probe,
 	.remove		= ishtp_cl_device_remove,
 	.pm		= &ishtp_cl_bus_dev_pm_ops,
@@ -416,7 +443,7 @@ static struct ishtp_cl_device *ishtp_bus_add_device(struct ishtp_device *dev,
 		list_del(&device->device_link);
 		spin_unlock_irqrestore(&dev->device_list_lock, flags);
 		dev_err(dev->devc, "Failed to register ISHTP client device\n");
-		kfree(device);
+		put_device(&device->dev);
 		return NULL;
 	}
 
@@ -560,6 +587,33 @@ void ishtp_put_device(struct ishtp_cl_device *cl_device)
 	cl_device->reference_count--;
 }
 EXPORT_SYMBOL(ishtp_put_device);
+
+/**
+ * ishtp_set_drvdata() - set client driver data
+ * @cl_device:	client device instance
+ * @data:	driver data need to be set
+ *
+ * Set client driver data to cl_device->driver_data.
+ */
+void ishtp_set_drvdata(struct ishtp_cl_device *cl_device, void *data)
+{
+	cl_device->driver_data = data;
+}
+EXPORT_SYMBOL(ishtp_set_drvdata);
+
+/**
+ * ishtp_get_drvdata() - get client driver data
+ * @cl_device:	client device instance
+ *
+ * Get client driver data from cl_device->driver_data.
+ *
+ * Return: pointer of driver data
+ */
+void *ishtp_get_drvdata(struct ishtp_cl_device *cl_device)
+{
+	return cl_device->driver_data;
+}
+EXPORT_SYMBOL(ishtp_get_drvdata);
 
 /**
  * ishtp_bus_new_client() - Create a new client

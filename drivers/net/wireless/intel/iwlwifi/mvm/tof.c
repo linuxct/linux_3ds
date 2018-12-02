@@ -16,11 +16,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110,
- * USA
- *
  * The full GNU General Public License is included in this distribution
  * in the file called COPYING.
  *
@@ -61,7 +56,7 @@
  *
  *****************************************************************************/
 #include "mvm.h"
-#include "fw-api-tof.h"
+#include "fw/api/tof.h"
 
 #define IWL_MVM_TOF_RANGE_REQ_MAX_ID 256
 
@@ -93,17 +88,21 @@ void iwl_mvm_tof_init(struct iwl_mvm *mvm)
 		cpu_to_le32(TOF_RANGE_REQ_EXT_CMD);
 
 	mvm->tof_data.active_range_request = IWL_MVM_TOF_RANGE_REQ_MAX_ID;
+	mvm->init_status |= IWL_MVM_INIT_STATUS_TOF_INIT_COMPLETE;
 }
 
 void iwl_mvm_tof_clean(struct iwl_mvm *mvm)
 {
 	struct iwl_mvm_tof_data *tof_data = &mvm->tof_data;
 
-	if (!fw_has_capa(&mvm->fw->ucode_capa, IWL_UCODE_TLV_CAPA_TOF_SUPPORT))
+	if (!fw_has_capa(&mvm->fw->ucode_capa,
+			 IWL_UCODE_TLV_CAPA_TOF_SUPPORT) ||
+	    !(mvm->init_status & IWL_MVM_INIT_STATUS_TOF_INIT_COMPLETE))
 		return;
 
 	memset(tof_data, 0, sizeof(*tof_data));
 	mvm->tof_data.active_range_request = IWL_MVM_TOF_RANGE_REQ_MAX_ID;
+	mvm->init_status &= ~IWL_MVM_INIT_STATUS_TOF_INIT_COMPLETE;
 }
 
 static void iwl_tof_iterator(void *_data, u8 *mac,
