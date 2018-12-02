@@ -26,8 +26,9 @@
 #include <linux/spinlock.h>
 #include <linux/freezer.h>
 #include <linux/major.h>
+#include <linux/tpm_eventlog.h>
+#include <linux/hw_random.h>
 #include "tpm.h"
-#include "tpm_eventlog.h"
 
 DEFINE_IDR(dev_nums_idr);
 static DEFINE_MUTEX(idr_lock);
@@ -80,38 +81,66 @@ void tpm_put_ops(struct tpm_chip *chip)
 EXPORT_SYMBOL_GPL(tpm_put_ops);
 
 /**
- * tpm_chip_find_get() - return tpm_chip for a given chip number
- * @chip_num: id to find
- *
- * The return'd chip has been tpm_try_get_ops'd and must be released via
- * tpm_put_ops
+ * tpm_default_chip() - find a TPM chip and get a reference to it
  */
-struct tpm_chip *tpm_chip_find_get(int chip_num)
+struct tpm_chip *tpm_default_chip(void)
 {
 	struct tpm_chip *chip, *res = NULL;
+	int chip_num = 0;
 	int chip_prev;
 
 	mutex_lock(&idr_lock);
 
-	if (chip_num == TPM_ANY_NUM) {
-		chip_num = 0;
-		do {
-			chip_prev = chip_num;
-			chip = idr_get_next(&dev_nums_idr, &chip_num);
-			if (chip && !tpm_try_get_ops(chip)) {
-				res = chip;
-				break;
-			}
-		} while (chip_prev != chip_num);
-	} else {
-		chip = idr_find(&dev_nums_idr, chip_num);
-		if (chip && !tpm_try_get_ops(chip))
+	do {
+		chip_prev = chip_num;
+		chip = idr_get_next(&dev_nums_idr, &chip_num);
+		if (chip) {
+			get_device(&chip->dev);
 			res = chip;
-	}
+			break;
+		}
+	} while (chip_prev != chip_num);
 
 	mutex_unlock(&idr_lock);
 
 	return res;
+}
+EXPORT_SYMBOL_GPL(tpm_default_chip);
+
+/**
+ * tpm_find_get_ops() - find and reserve a TPM chip
+ * @chip:	a &struct tpm_chip instance, %NULL for the default chip
+ *
+ * Finds a TPM chip and reserves its class device and operations. The chip must
+ * be released with tpm_put_ops() after use.
+ * This function is for internal use only. It supports existing TPM callers
+ * by accepting NULL, but those callers should be converted to pass in a chip
+ * directly.
+ *
+ * Return:
+ * A reserved &struct tpm_chip instance.
+ * %NULL if a chip is not found.
+ * %NULL if the chip is not available.
+ */
+struct tpm_chip *tpm_find_get_ops(struct tpm_chip *chip)
+{
+	int rc;
+
+	if (chip) {
+		if (!tpm_try_get_ops(chip))
+			return chip;
+		return NULL;
+	}
+
+	chip = tpm_default_chip();
+	if (!chip)
+		return NULL;
+	rc = tpm_try_get_ops(chip);
+	/* release additional reference we got from tpm_default_chip() */
+	put_device(&chip->dev);
+	if (rc)
+		return NULL;
+	return chip;
 }
 
 /**
@@ -140,6 +169,32 @@ static void tpm_devs_release(struct device *dev)
 
 	/* release the master device reference */
 	put_device(&chip->dev);
+}
+
+/**
+ * tpm_class_shutdown() - prepare the TPM device for loss of power.
+ * @dev: device to which the chip is associated.
+ *
+ * Issues a TPM2_Shutdown command prior to loss of power, as required by the
+ * TPM 2.0 spec.
+ * Then, calls bus- and device- specific shutdown code.
+ *
+ * XXX: This codepath relies on the fact that sysfs is not enabled for
+ * TPM2: sysfs uses an implicit lock on chip->ops, so this could race if TPM2
+ * has sysfs support enabled before TPM sysfs's implicit locking is fixed.
+ */
+static int tpm_class_shutdown(struct device *dev)
+{
+	struct tpm_chip *chip = container_of(dev, struct tpm_chip, dev);
+
+	if (chip->flags & TPM_CHIP_FLAG_TPM2) {
+		down_write(&chip->ops_sem);
+		tpm2_shutdown(chip, TPM2_SU_CLEAR);
+		chip->ops = NULL;
+		up_write(&chip->ops_sem);
+	}
+
+	return 0;
 }
 
 /**
@@ -181,6 +236,7 @@ struct tpm_chip *tpm_chip_alloc(struct device *pdev,
 	device_initialize(&chip->devs);
 
 	chip->dev.class = tpm_class;
+	chip->dev.class->shutdown_pre = tpm_class_shutdown;
 	chip->dev.release = tpm_dev_release;
 	chip->dev.parent = pdev;
 	chip->dev.groups = chip->groups;
@@ -360,6 +416,26 @@ static int tpm_add_legacy_sysfs(struct tpm_chip *chip)
 
 	return 0;
 }
+
+static int tpm_hwrng_read(struct hwrng *rng, void *data, size_t max, bool wait)
+{
+	struct tpm_chip *chip = container_of(rng, struct tpm_chip, hwrng);
+
+	return tpm_get_random(chip, data, max);
+}
+
+static int tpm_add_hwrng(struct tpm_chip *chip)
+{
+	if (!IS_ENABLED(CONFIG_HW_RANDOM_TPM))
+		return 0;
+
+	snprintf(chip->hwrng_name, sizeof(chip->hwrng_name),
+		 "tpm-rng-%d", chip->dev_num);
+	chip->hwrng.name = chip->hwrng_name;
+	chip->hwrng.read = tpm_hwrng_read;
+	return hwrng_register(&chip->hwrng);
+}
+
 /*
  * tpm_chip_register() - create a character device for the TPM chip
  * @chip: TPM chip to use.
@@ -392,11 +468,13 @@ int tpm_chip_register(struct tpm_chip *chip)
 
 	tpm_add_ppi(chip);
 
+	rc = tpm_add_hwrng(chip);
+	if (rc)
+		goto out_ppi;
+
 	rc = tpm_add_char_device(chip);
-	if (rc) {
-		tpm_bios_log_teardown(chip);
-		return rc;
-	}
+	if (rc)
+		goto out_hwrng;
 
 	rc = tpm_add_legacy_sysfs(chip);
 	if (rc) {
@@ -405,6 +483,14 @@ int tpm_chip_register(struct tpm_chip *chip)
 	}
 
 	return 0;
+
+out_hwrng:
+	if (IS_ENABLED(CONFIG_HW_RANDOM_TPM))
+		hwrng_unregister(&chip->hwrng);
+out_ppi:
+	tpm_bios_log_teardown(chip);
+
+	return rc;
 }
 EXPORT_SYMBOL_GPL(tpm_chip_register);
 
@@ -424,6 +510,8 @@ EXPORT_SYMBOL_GPL(tpm_chip_register);
 void tpm_chip_unregister(struct tpm_chip *chip)
 {
 	tpm_del_legacy_sysfs(chip);
+	if (IS_ENABLED(CONFIG_HW_RANDOM_TPM))
+		hwrng_unregister(&chip->hwrng);
 	tpm_bios_log_teardown(chip);
 	if (chip->flags & TPM_CHIP_FLAG_TPM2)
 		cdev_device_del(&chip->cdevs, &chip->devs);

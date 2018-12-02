@@ -17,6 +17,9 @@
 
 #ifdef CONFIG_KEYS
 
+struct kernel_pkey_query;
+struct kernel_pkey_params;
+
 /*
  * key under-construction record
  * - passed to the request_key actor if supplied
@@ -44,8 +47,8 @@ struct key_preparsed_payload {
 	const void	*data;		/* Raw data */
 	size_t		datalen;	/* Raw datalen */
 	size_t		quotalen;	/* Quota length for proposed payload */
-	time_t		expiry;		/* Expiry time of key */
-};
+	time64_t	expiry;		/* Expiry time of key */
+} __randomize_layout;
 
 typedef int (*request_key_actor_t)(struct key_construction *key,
 				   const char *op, void *aux);
@@ -155,10 +158,18 @@ struct key_type {
 	 */
 	struct key_restriction *(*lookup_restriction)(const char *params);
 
+	/* Asymmetric key accessor functions. */
+	int (*asym_query)(const struct kernel_pkey_params *params,
+			  struct kernel_pkey_query *info);
+	int (*asym_eds_op)(struct kernel_pkey_params *params,
+			   const void *in, void *out);
+	int (*asym_verify_signature)(struct kernel_pkey_params *params,
+				     const void *in, const void *in2);
+
 	/* internal fields */
 	struct list_head	link;		/* link in types list */
 	struct lock_class_key	lock_class;	/* key->sem lock class */
-};
+} __randomize_layout;
 
 extern struct key_type key_type_keyring;
 

@@ -280,14 +280,14 @@ static int write_ipc_from_queue(struct ishtp_device *dev)
 	 * if tx send list is empty - return 0;
 	 * may happen, as RX_COMPLETE handler doesn't check list emptiness.
 	 */
-	if (list_empty(&dev->wr_processing_list_head.link)) {
+	if (list_empty(&dev->wr_processing_list)) {
 		spin_unlock_irqrestore(&dev->wr_processing_spinlock, flags);
 		out_ipc_locked = 0;
 		return	0;
 	}
 
-	ipc_link = list_entry(dev->wr_processing_list_head.link.next,
-			      struct wr_msg_ctl_info, link);
+	ipc_link = list_first_entry(&dev->wr_processing_list,
+				    struct wr_msg_ctl_info, link);
 	/* first 4 bytes of the data is the doorbell value (IPC header) */
 	length = ipc_link->length - sizeof(uint32_t);
 	doorbell_val = *(uint32_t *)ipc_link->inline_data;
@@ -296,17 +296,12 @@ static int write_ipc_from_queue(struct ishtp_device *dev)
 	/* If sending MNG_SYNC_FW_CLOCK, update clock again */
 	if (IPC_HEADER_GET_PROTOCOL(doorbell_val) == IPC_PROTOCOL_MNG &&
 		IPC_HEADER_GET_MNG_CMD(doorbell_val) == MNG_SYNC_FW_CLOCK) {
-		struct timespec ts_system;
-		struct timeval tv_utc;
-		uint64_t        usec_system, usec_utc;
+		uint64_t usec_system, usec_utc;
 		struct ipc_time_update_msg time_update;
 		struct time_sync_format ts_format;
 
-		get_monotonic_boottime(&ts_system);
-		do_gettimeofday(&tv_utc);
-		usec_system = (timespec_to_ns(&ts_system)) / NSEC_PER_USEC;
-		usec_utc = (uint64_t)tv_utc.tv_sec * 1000000 +
-						((uint32_t)tv_utc.tv_usec);
+		usec_system = ktime_to_us(ktime_get_boottime());
+		usec_utc = ktime_to_us(ktime_get_real());
 		ts_format.ts1_source = HOST_SYSTEM_TIME_USEC;
 		ts_format.ts2_source = HOST_UTC_TIME_USEC;
 		ts_format.reserved = 0;
@@ -343,7 +338,7 @@ static int write_ipc_from_queue(struct ishtp_device *dev)
 	ipc_send_compl = ipc_link->ipc_send_compl;
 	ipc_send_compl_prm = ipc_link->ipc_send_compl_prm;
 	list_del_init(&ipc_link->link);
-	list_add_tail(&ipc_link->link, &dev->wr_free_list_head.link);
+	list_add(&ipc_link->link, &dev->wr_free_list);
 	spin_unlock_irqrestore(&dev->wr_processing_spinlock, flags);
 
 	/*
@@ -377,18 +372,18 @@ static int write_ipc_to_queue(struct ishtp_device *dev,
 	unsigned char *msg, int length)
 {
 	struct wr_msg_ctl_info *ipc_link;
-	unsigned long	flags;
+	unsigned long flags;
 
 	if (length > IPC_FULL_MSG_SIZE)
 		return -EMSGSIZE;
 
 	spin_lock_irqsave(&dev->wr_processing_spinlock, flags);
-	if (list_empty(&dev->wr_free_list_head.link)) {
+	if (list_empty(&dev->wr_free_list)) {
 		spin_unlock_irqrestore(&dev->wr_processing_spinlock, flags);
 		return -ENOMEM;
 	}
-	ipc_link = list_entry(dev->wr_free_list_head.link.next,
-		struct wr_msg_ctl_info, link);
+	ipc_link = list_first_entry(&dev->wr_free_list,
+				    struct wr_msg_ctl_info, link);
 	list_del_init(&ipc_link->link);
 
 	ipc_link->ipc_send_compl = ipc_send_compl;
@@ -396,7 +391,7 @@ static int write_ipc_to_queue(struct ishtp_device *dev,
 	ipc_link->length = length;
 	memcpy(ipc_link->inline_data, msg, length);
 
-	list_add_tail(&ipc_link->link, &dev->wr_processing_list_head.link);
+	list_add_tail(&ipc_link->link, &dev->wr_processing_list);
 	spin_unlock_irqrestore(&dev->wr_processing_spinlock, flags);
 
 	write_ipc_from_queue(dev);
@@ -492,17 +487,13 @@ static int ish_fw_reset_handler(struct ishtp_device *dev)
 {
 	uint32_t	reset_id;
 	unsigned long	flags;
-	struct wr_msg_ctl_info *processing, *next;
 
 	/* Read reset ID */
 	reset_id = ish_reg_read(dev, IPC_REG_ISH2HOST_MSG) & 0xFFFF;
 
 	/* Clear IPC output queue */
 	spin_lock_irqsave(&dev->wr_processing_spinlock, flags);
-	list_for_each_entry_safe(processing, next,
-			&dev->wr_processing_list_head.link, link) {
-		list_move_tail(&processing->link, &dev->wr_free_list_head.link);
-	}
+	list_splice_init(&dev->wr_processing_list, &dev->wr_free_list);
 	spin_unlock_irqrestore(&dev->wr_processing_spinlock, flags);
 
 	/* ISHTP notification in IPC_RESET */
@@ -575,15 +566,13 @@ static void fw_reset_work_fn(struct work_struct *unused)
 static void _ish_sync_fw_clock(struct ishtp_device *dev)
 {
 	static unsigned long	prev_sync;
-	struct timespec	ts;
 	uint64_t	usec;
 
 	if (prev_sync && jiffies - prev_sync < 20 * HZ)
 		return;
 
 	prev_sync = jiffies;
-	get_monotonic_boottime(&ts);
-	usec = (timespec_to_ns(&ts)) / NSEC_PER_USEC;
+	usec = ktime_to_us(ktime_get_boottime());
 	ipc_send_mng_msg(dev, MNG_SYNC_FW_CLOCK, &usec, sizeof(uint64_t));
 }
 
@@ -914,8 +903,9 @@ struct ishtp_device *ish_dev_init(struct pci_dev *pdev)
 	struct ishtp_device *dev;
 	int	i;
 
-	dev = kzalloc(sizeof(struct ishtp_device) + sizeof(struct ish_hw),
-		GFP_KERNEL);
+	dev = devm_kzalloc(&pdev->dev,
+			   sizeof(struct ishtp_device) + sizeof(struct ish_hw),
+			   GFP_KERNEL);
 	if (!dev)
 		return NULL;
 
@@ -927,12 +917,14 @@ struct ishtp_device *ish_dev_init(struct pci_dev *pdev)
 	spin_lock_init(&dev->out_ipc_spinlock);
 
 	/* Init IPC processing and free lists */
-	INIT_LIST_HEAD(&dev->wr_processing_list_head.link);
-	INIT_LIST_HEAD(&dev->wr_free_list_head.link);
-	for (i = 0; i < IPC_TX_FIFO_SIZE; ++i) {
+	INIT_LIST_HEAD(&dev->wr_processing_list);
+	INIT_LIST_HEAD(&dev->wr_free_list);
+	for (i = 0; i < IPC_TX_FIFO_SIZE; i++) {
 		struct wr_msg_ctl_info	*tx_buf;
 
-		tx_buf = kzalloc(sizeof(struct wr_msg_ctl_info), GFP_KERNEL);
+		tx_buf = devm_kzalloc(&pdev->dev,
+				      sizeof(struct wr_msg_ctl_info),
+				      GFP_KERNEL);
 		if (!tx_buf) {
 			/*
 			 * IPC buffers may be limited or not available
@@ -943,7 +935,7 @@ struct ishtp_device *ish_dev_init(struct pci_dev *pdev)
 				i);
 			break;
 		}
-		list_add_tail(&tx_buf->link, &dev->wr_free_list_head.link);
+		list_add_tail(&tx_buf->link, &dev->wr_free_list);
 	}
 
 	dev->ops = &ish_hw_ops;

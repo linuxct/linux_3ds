@@ -65,7 +65,7 @@ MODULE_PARM_DESC(watchdog, "transmit timeout in milliseconds");
  */
 static int debug;
 module_param(debug, int, 0644);
-MODULE_PARM_DESC(debug, "dm9000 debug level (0-4)");
+MODULE_PARM_DESC(debug, "dm9000 debug level (0-6)");
 
 /* DM9000 register address locking.
  *
@@ -1171,7 +1171,7 @@ dm9000_rx(struct net_device *dev)
 		if (GoodPacket &&
 		    ((skb = netdev_alloc_skb(dev, RxLen + 4)) != NULL)) {
 			skb_reserve(skb, 2);
-			rdptr = (u8 *) skb_put(skb, RxLen - 4);
+			rdptr = skb_put(skb, RxLen - 4);
 
 			/* Read received packet from RX SRAM */
 
@@ -1722,8 +1722,7 @@ out:
 static int
 dm9000_drv_suspend(struct device *dev)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct net_device *ndev = platform_get_drvdata(pdev);
+	struct net_device *ndev = dev_get_drvdata(dev);
 	struct board_info *db;
 
 	if (ndev) {
@@ -1745,8 +1744,7 @@ dm9000_drv_suspend(struct device *dev)
 static int
 dm9000_drv_resume(struct device *dev)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct net_device *ndev = platform_get_drvdata(pdev);
+	struct net_device *ndev = dev_get_drvdata(dev);
 	struct board_info *db = netdev_priv(ndev);
 
 	if (ndev) {

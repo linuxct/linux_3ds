@@ -737,7 +737,7 @@ static struct ata_port_operations inic_port_ops = {
 	.port_start		= inic_port_start,
 };
 
-static struct ata_port_info inic_port_info = {
+static const struct ata_port_info inic_port_info = {
 	.flags			= ATA_FLAG_SATA | ATA_FLAG_PIO_DMA,
 	.pio_mask		= ATA_PIO4,
 	.mwdma_mask		= ATA_MWDMA2,
@@ -873,7 +873,7 @@ static int inic_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	 * like others but it will lock up the whole machine HARD if
 	 * 65536 byte PRD entry is fed. Reduce maximum segment size.
 	 */
-	rc = pci_set_dma_max_seg_size(pdev, 65536 - 512);
+	rc = dma_set_max_seg_size(&pdev->dev, 65536 - 512);
 	if (rc) {
 		dev_err(&pdev->dev, "failed to set the maximum segment size\n");
 		return rc;

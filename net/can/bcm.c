@@ -239,19 +239,6 @@ static int bcm_proc_show(struct seq_file *m, void *v)
 	seq_putc(m, '\n');
 	return 0;
 }
-
-static int bcm_proc_open(struct inode *inode, struct file *file)
-{
-	return single_open_net(inode, file, bcm_proc_show);
-}
-
-static const struct file_operations bcm_proc_fops = {
-	.owner		= THIS_MODULE,
-	.open		= bcm_proc_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= single_release,
-};
 #endif /* CONFIG_PROC_FS */
 
 /*
@@ -282,7 +269,7 @@ static void bcm_can_tx(struct bcm_op *op)
 	can_skb_prv(skb)->ifindex = dev->ifindex;
 	can_skb_prv(skb)->skbcnt = 0;
 
-	memcpy(skb_put(skb, op->cfsiz), cf, op->cfsiz);
+	skb_put_data(skb, cf, op->cfsiz);
 
 	/* send with loopback */
 	skb->dev = dev;
@@ -318,13 +305,13 @@ static void bcm_send_to_user(struct bcm_op *op, struct bcm_msg_head *head,
 	if (!skb)
 		return;
 
-	memcpy(skb_put(skb, sizeof(*head)), head, sizeof(*head));
+	skb_put_data(skb, head, sizeof(*head));
 
 	if (head->nframes) {
 		/* CAN frames starting here */
 		firstframe = (struct canfd_frame *)skb_tail_pointer(skb);
 
-		memcpy(skb_put(skb, datalen), frames, datalen);
+		skb_put_data(skb, frames, datalen);
 
 		/*
 		 * the BCM uses the flags-element of the canfd_frame
@@ -936,8 +923,9 @@ static int bcm_tx_setup(struct bcm_msg_head *msg_head, struct msghdr *msg,
 
 		/* create array for CAN frames and copy the data */
 		if (msg_head->nframes > 1) {
-			op->frames = kmalloc(msg_head->nframes * op->cfsiz,
-					     GFP_KERNEL);
+			op->frames = kmalloc_array(msg_head->nframes,
+						   op->cfsiz,
+						   GFP_KERNEL);
 			if (!op->frames) {
 				kfree(op);
 				return -ENOMEM;
@@ -1108,15 +1096,17 @@ static int bcm_rx_setup(struct bcm_msg_head *msg_head, struct msghdr *msg,
 
 		if (msg_head->nframes > 1) {
 			/* create array for CAN frames and copy the data */
-			op->frames = kmalloc(msg_head->nframes * op->cfsiz,
-					     GFP_KERNEL);
+			op->frames = kmalloc_array(msg_head->nframes,
+						   op->cfsiz,
+						   GFP_KERNEL);
 			if (!op->frames) {
 				kfree(op);
 				return -ENOMEM;
 			}
 
 			/* create and init array for received CAN frames */
-			op->last_frames = kzalloc(msg_head->nframes * op->cfsiz,
+			op->last_frames = kcalloc(msg_head->nframes,
+						  op->cfsiz,
 						  GFP_KERNEL);
 			if (!op->last_frames) {
 				kfree(op->frames);
@@ -1493,13 +1483,14 @@ static int bcm_init(struct sock *sk)
 static int bcm_release(struct socket *sock)
 {
 	struct sock *sk = sock->sk;
-	struct net *net = sock_net(sk);
+	struct net *net;
 	struct bcm_sock *bo;
 	struct bcm_op *op, *next;
 
-	if (sk == NULL)
+	if (!sk)
 		return 0;
 
+	net = sock_net(sk);
 	bo = bcm_sk(sk);
 
 	/* remove bcm_ops, timer, rx_unregister(), etc. */
@@ -1606,9 +1597,9 @@ static int bcm_connect(struct socket *sock, struct sockaddr *uaddr, int len,
 	if (net->can.bcmproc_dir) {
 		/* unique socket address as filename */
 		sprintf(bo->procname, "%lu", sock_i_ino(sk));
-		bo->bcm_proc_read = proc_create_data(bo->procname, 0644,
+		bo->bcm_proc_read = proc_create_net_single(bo->procname, 0644,
 						     net->can.bcmproc_dir,
-						     &bcm_proc_fops, sk);
+						     bcm_proc_show, sk);
 		if (!bo->bcm_proc_read) {
 			ret = -ENOMEM;
 			goto fail;
